@@ -45,6 +45,14 @@ const statusSchema = z.object({ status: z.enum(STATUSES) });
 const chatSchema = z.object({ message: z.string().trim().min(1).max(300) });
 const loginSchema = z.object({ email: z.string().email(), password: z.string().min(1) });
 
+const listSchema = z.object({
+  search: z.string().trim().max(80).optional(),
+  status: z.enum(STATUSES).optional(),
+  service: z.enum(SERVICES).optional(),
+  sort: z.enum(['newest', 'oldest', 'name']).default('newest'),
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(50).default(10),
+});
 
 const requireAdmin = (req: Request, res: Response, next: NextFunction) => {
   const token = req.headers.authorization?.replace('Bearer ', '');
@@ -111,9 +119,45 @@ app.post('/api/auth/login', loginLimiter, (req, res) => {
 });
 
 
-app.get('/api/enquiries', requireAdmin, (_req, res) => {
-  const rows = db.prepare('SELECT * FROM enquiries ORDER BY id DESC').all();
-  res.json(rows);
+app.get('/api/enquiries', requireAdmin, (req, res) => {
+  const q = listSchema.safeParse(req.query);
+  if (!q.success) {
+    res.status(400).json({ error: 'Invalid query options' });
+    return;
+  }
+  const { search, status, service, sort, page, limit } = q.data;
+
+  const where: string[] = [];
+  const params: (string | number)[] = [];
+  if (search) {
+    where.push('(name LIKE ? OR email LIKE ? OR message LIKE ?)');
+    params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+  }
+  if (status) {
+    where.push('status = ?');
+    params.push(status);
+  }
+  if (service) {
+    where.push('service = ?');
+    params.push(service);
+  }
+  const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
+
+  const orderSql = {
+    newest: 'created_at DESC, id DESC',
+    oldest: 'created_at ASC, id ASC',
+    name: 'name COLLATE NOCASE ASC',
+  }[sort];
+
+  const total = (
+    db.prepare(`SELECT COUNT(*) AS c FROM enquiries ${whereSql}`).get(...params) as { c: number }
+  ).c;
+
+  const items = db
+    .prepare(`SELECT * FROM enquiries ${whereSql} ORDER BY ${orderSql} LIMIT ? OFFSET ?`)
+    .all(...params, limit, (page - 1) * limit);
+
+  res.json({ items, total, page, pages: Math.max(1, Math.ceil(total / limit)) });
 });
 
 app.get('/api/enquiries/:id', requireAdmin, (req, res) => {
@@ -165,7 +209,7 @@ app.delete('/api/enquiries/:id', requireAdmin, (req, res) => {
   res.status(204).end();
 });
 
-// ---------- Error handling ----------
+
 app.use((_req, res) => {
   res.status(404).json({ error: 'Route not found' });
 });
