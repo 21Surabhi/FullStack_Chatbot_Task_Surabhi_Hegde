@@ -1,12 +1,28 @@
-import express from 'express';
+import 'dotenv/config';
+import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
-import { db } from './db';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
+import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
 import { z } from 'zod';
+import { db } from './db';
+import { getReply } from './chatbot';
+
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) throw new Error('JWT_SECRET is missing. Create server/.env first.');
 
 const app = express();
 
-app.use(cors());
-app.use(express.json());
+app.use(helmet());
+app.use(cors({ origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173' }));
+app.use(express.json({ limit: '10kb' }));
+app.use('/api', rateLimit({ windowMs: 15 * 60 * 1000, limit: 300 }));
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  message: { error: 'Too many login attempts, try again later' },
+});
 
 const SERVICES = ['aerial_media', 'mapping_survey', 'training', 'events', 'other'] as const;
 const STATUSES = ['new', 'contacted', 'closed'] as const;
@@ -26,11 +42,33 @@ const enquirySchema = z.object({
 
 const idSchema = z.coerce.number().int().positive();
 const statusSchema = z.object({ status: z.enum(STATUSES) });
+const chatSchema = z.object({ message: z.string().trim().min(1).max(300) });
+const loginSchema = z.object({ email: z.string().email(), password: z.string().min(1) });
+
+
+const requireAdmin = (req: Request, res: Response, next: NextFunction) => {
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  try {
+    jwt.verify(token ?? '', JWT_SECRET);
+    next();
+  } catch {
+    res.status(401).json({ error: 'Unauthorized' });
+  }
+};
+
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true });
 });
 
+app.post('/api/chat', (req, res) => {
+  const result = chatSchema.safeParse(req.body);
+  if (!result.success) {
+    res.status(400).json({ error: 'Message is required (max 300 characters)' });
+    return;
+  }
+  res.json(getReply(result.data.message));
+});
 
 app.post('/api/enquiries', (req, res) => {
   const result = enquirySchema.safeParse(req.body);
@@ -43,7 +81,6 @@ app.post('/api/enquiries', (req, res) => {
   }
 
   const { name, email, phone, service, message } = result.data;
-
   const info = db
     .prepare(
       'INSERT INTO enquiries (name, email, phone, service, message) VALUES (?, ?, ?, ?, ?)'
@@ -53,14 +90,33 @@ app.post('/api/enquiries', (req, res) => {
   res.status(201).json({ id: info.lastInsertRowid });
 });
 
+app.post('/api/auth/login', loginLimiter, (req, res) => {
+  const body = loginSchema.safeParse(req.body);
+  if (!body.success) {
+    res.status(400).json({ error: 'Email and password are required' });
+    return;
+  }
 
-app.get('/api/enquiries', (_req, res) => {
+  const admin = db.prepare('SELECT * FROM admins WHERE email = ?').get(body.data.email) as
+    | { id: number; password_hash: string }
+    | undefined;
+
+ 
+  if (!admin || !bcrypt.compareSync(body.data.password, admin.password_hash)) {
+    res.status(401).json({ error: 'Invalid email or password' });
+    return;
+  }
+
+  res.json({ token: jwt.sign({ sub: admin.id }, JWT_SECRET, { expiresIn: '8h' }) });
+});
+
+
+app.get('/api/enquiries', requireAdmin, (_req, res) => {
   const rows = db.prepare('SELECT * FROM enquiries ORDER BY id DESC').all();
   res.json(rows);
 });
 
-
-app.get('/api/enquiries/:id', (req, res) => {
+app.get('/api/enquiries/:id', requireAdmin, (req, res) => {
   const id = idSchema.safeParse(req.params.id);
   if (!id.success) {
     res.status(400).json({ error: 'Invalid id' });
@@ -75,8 +131,7 @@ app.get('/api/enquiries/:id', (req, res) => {
   res.json(row);
 });
 
-
-app.patch('/api/enquiries/:id', (req, res) => {
+app.patch('/api/enquiries/:id', requireAdmin, (req, res) => {
   const id = idSchema.safeParse(req.params.id);
   const body = statusSchema.safeParse(req.body);
   if (!id.success || !body.success) {
@@ -95,8 +150,7 @@ app.patch('/api/enquiries/:id', (req, res) => {
   res.json(db.prepare('SELECT * FROM enquiries WHERE id = ?').get(id.data));
 });
 
-
-app.delete('/api/enquiries/:id', (req, res) => {
+app.delete('/api/enquiries/:id', requireAdmin, (req, res) => {
   const id = idSchema.safeParse(req.params.id);
   if (!id.success) {
     res.status(400).json({ error: 'Invalid id' });
@@ -111,7 +165,17 @@ app.delete('/api/enquiries/:id', (req, res) => {
   res.status(204).end();
 });
 
-const port = 4000;
+// ---------- Error handling ----------
+app.use((_req, res) => {
+  res.status(404).json({ error: 'Route not found' });
+});
+
+app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
+  console.error(err); // full details only in the server log
+  res.status(500).json({ error: 'Something went wrong' }); // generic message for users
+});
+
+const port = Number(process.env.PORT) || 4000;
 app.listen(port, () => {
   console.log(`API running on http://localhost:${port}`);
 });
