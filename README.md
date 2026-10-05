@@ -63,7 +63,7 @@ cd FullStack_Chatbot_Task_Surabhi_Hegde
 ```bash
 cd server
 npm install
-cp .env.example .env        # Windows PowerShell: copy .env.example .env
+cp .env.example .env        
 ```
 
 Open `server/.env` and set your own values (see the next section), then start the server:
@@ -83,7 +83,7 @@ Open a second terminal:
 ```bash
 cd client
 npm install
-cp .env.example .env        # Windows PowerShell: copy .env.example .env
+cp .env.example .env        
 npm run dev
 ```
 
