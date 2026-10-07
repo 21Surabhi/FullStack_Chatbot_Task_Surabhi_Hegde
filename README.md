@@ -2,7 +2,7 @@
 
 A responsive full stack web app for a drone services business. Visitors chat with a rule-based assistant (SkyBot) and submit enquiries. The team manages those leads from a password-protected admin dashboard.
 
-Built as the Full Stack Developer Intern practical assignment for IPAGE Group. DroneTV.in was used only for business context. The design and code are original.
+Built as the Full Stack Developer Intern practical assignment for IPAGE Group. 
 
 ## Features
 
